@@ -178,12 +178,12 @@ python main.py
 
 ### 团队分工
 
-| 角色 | 负责人 | 负责模块 | 核心文件 |
-|------|--------|---------|---------|
-| PM/核心算法 | 项目负责人 | 配置、纯逻辑、编解码、整合、纠错 | `config.py`, `core/*`, `dna_codec.py`, `error_corrector.py`, `main.py` |
-| 前端开发 | 同学A | Flet界面、交互逻辑、任务栏 | `ui_interface.py` |
-| 数据库开发 | 同学B | 表结构、CRUD、文件解析、相似度 | `data_store.py` |
-| AI工程师 | 同学C | Ollama集成、Prompt工程、字段提取 | `ollama_api.py` |
+| 角色 | 负责模块 | 核心文件 |
+|------|---------|---------|
+| PM/核心算法 | 配置、纯逻辑、编解码、整合、纠错 | `config.py`, `core/*`, `dna_codec.py`, `error_corrector.py`, `main.py` |
+| 前端开发 | Flet界面、交互逻辑、任务栏 | `ui_interface.py` |
+| 数据库开发 | 表结构、CRUD、文件解析、相似度 | `data_store.py` |
+| AI工程师 | Ollama集成、Prompt工程、字段提取 | `ollama_api.py` |
 
 ### 接口契约
 
