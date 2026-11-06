@@ -1,3 +1,13 @@
+> ⛔ **本文档已作废（2026-11-02）**
+>
+> 表结构、字段定义、CRUD 接口以 → **`database_v2_design.md` v2.1** 为准。
+> 本文档仅保留两类内容供参考：① 文件存储目录约定；② `parse_document` / `save_upload_file` /
+> `cleanup_temp_files` / `search_disease` / `find_similar_*` 等接口的历史描述（已并入 v2.1 §7.5~§7.7）。
+>
+> 请勿按本文档的 4 张表、23 个固定列实现。
+
+---
+
 # 数据库与文件处理模块开发文档
 
 ## 模块概述
