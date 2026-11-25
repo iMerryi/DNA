@@ -1,3 +1,5 @@
+> ⚠️ **前代版本（v3.1 键值模型）——仅供追溯，勿照此施工。** v4.1 定稿后，本文表结构与字段口径已被《00_数据库开发书_最终版_v4.0.md》（内容 v4.1）取代；数据层接口以 `../01_需求与总体设计/api_contract.md` §8 为准。
+
 # 核心业务 CRUD SQL 说明
 
 > 对应 `DataStore` 接口的内部 SQL 实现。每条给出：业务场景 → SQL → 说明。
@@ -264,6 +266,10 @@ WHERE r.record_id = :record_id;
 
 应用层将 fields 组装为字典（多值字段为有序数组，顺序由 seq 决定），再 `json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))` 得到纯 ASCII 载荷。
 
+**v3.1 明确一点**：载荷里**不放 `icd_code`**。码是国家标准数据、不是病人信息，放进去只会让载荷变长、还要跟着码表版本走；`term_key` 已能唯一定位词条，词条到码的映射随时可 JOIN 出来。因此 `payload_version` 保持 `v2`，老档案无需重编码。
+
+> **载荷口径修订（2026-11-17）**：v4.1 answers 模型重构后，`payload_version` 已升 **`v3`**，以 `../01_需求与总体设计/api_contract.md` §8.3 为准，本段"保持 v2"作废。
+
 ---
 
 ## 10. 解码回填校验
@@ -390,3 +396,86 @@ LIMIT :limit OFFSET :offset;
 ### 13.4 归属校验的边界（如实说明）
 
 `save_record` / `list_records` 带归属参数，但 `load_record` / `update_record` / `delete_record` **不校验归属**——知道 `record_id` 就能读写。这是单机应用的取舍：账号解决"数据是谁的"，不解决"防别人偷看"。答辩口径：**数据归属区分，不是权限控制**。
+
+---
+
+## 14. 标准诊断编码查询（v3.1 新增）
+
+`icd_codes` 是只读表，本节只有 SELECT，没有写入口（写由 `scripts/import_icd_codes.py` 独占）。
+
+### 14.1 编码联想（输入 `E11` → 候选诊断）
+
+```sql
+-- 前缀检索走主键 B-tree，35,867 行下为毫秒级
+SELECT code, name, chapter_name
+FROM icd_codes
+WHERE is_active = 1 AND code LIKE :prefix || '%'
+ORDER BY code
+LIMIT 20;
+```
+
+### 14.2 诊断名称联想（输入「糖尿」）
+
+```sql
+SELECT code, name, chapter_name
+FROM icd_codes
+WHERE is_active = 1 AND name LIKE '%' || :kw || '%'
+ORDER BY LENGTH(name), code
+LIMIT 20;
+```
+
+**说明**：前置通配符用不上索引，3.5 万行全表扫描约 20–40ms，交互可接受。若前端要求逐字联想，再上 FTS5（`03` §索引设计说明第 6 条）。
+
+### 14.3 词条选择器（带标准码，供填写病症结果时用）
+
+```sql
+SELECT t.id, t.term_key, t.chinese_name, t.english_name, t.category,
+       t.icd_code, i.name AS icd_name, i.chapter_code, i.chapter_name
+FROM disease_terms t
+LEFT JOIN icd_codes i ON i.code = t.icd_code
+WHERE t.is_active = 1
+  AND (:category IS NULL OR t.category = :category)
+ORDER BY t.category, t.id;
+```
+
+`LEFT JOIN` 不能写成 `JOIN`：`无`/`不详`/`正常` 三条没有码，内连接会把它们筛掉，前端就选不到「正常」了。
+
+### 14.4 按章节统计病症结果（报表用）
+
+```sql
+SELECT COALESCE(i.chapter_code, '-')  AS chapter_code,
+       COALESCE(i.chapter_name, '未归类') AS chapter_name,
+       COUNT(*)                        AS result_count,
+       SUM(CASE WHEN d.result_en = 'positive' THEN 1 ELSE 0 END) AS positive_count
+FROM record_diseases d
+JOIN disease_terms t ON t.id = d.disease_term_id
+LEFT JOIN icd_codes i ON i.code = t.icd_code
+JOIN archive_records a ON a.record_id = d.record_id AND a.is_deleted = 0
+GROUP BY chapter_code
+ORDER BY result_count DESC;
+```
+
+### 14.5 未绑定标准码的词条（数据治理清单）
+
+```sql
+SELECT t.id, t.term_key, t.chinese_name, t.category
+FROM disease_terms t
+WHERE t.icd_code IS NULL AND t.is_active = 1
+ORDER BY t.category, t.id;
+```
+
+**预期**：至少 3 条（`无`/`不详`/`正常`）属于「本来就没有码」，其余为待补绑；补绑后把 `icd_match` 从 `none` 改为 `manual` 或 `ai` 并记录复核人。
+
+### 14.6 码表自检（导入后验收）
+
+```sql
+SELECT COUNT(*)                                        AS total,        -- 期望 35867
+       COUNT(DISTINCT chapter_code)                    AS chapters,     -- 期望 22
+       SUM(instr(code, 'x') > 0)                       AS extensions,   -- 期望 15016
+       SUM(code LIKE '%+%' OR code LIKE '%*%')         AS combinations, -- 期望 1392
+       SUM(code <> TRIM(code))                         AS dirty_codes   -- 期望 0
+FROM icd_codes;
+```
+
+两个写法上的坑：`code LIKE '%x%'` 在 SQLite 里**不区分大小写**，会把 `X59.900` 这类外因码也算成扩展码（多出 2 条），必须用 `instr(code,'x') > 0`；`dirty_codes` 不为 0 说明导入时漏了 `strip()`，尾部带空格的编码会查不到，必须重导。
+

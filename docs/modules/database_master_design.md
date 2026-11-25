@@ -1,10 +1,12 @@
-# 医疗档案数据库主设计书 v3.0
+# 医疗档案数据库主设计书 v3.1
 
 > 模块：`data_store.py`（数据持久层）
-> 版本：**v3.0（终稿，可直接施工）**
+> 版本：**v3.1（终稿，可直接施工）**
 > 定位：**本文件是数据库开发的唯一依据。看完这一份就能开工，不需要再翻其他文档。**
 > 取代关系：`database.md`、`database_design.md`、`database_v2_design.md`、`medical_archive_database_design.md`、`user_account_module_design.md` 全部归档，仅作历史记录，**冲突时以本文档为准**。
 > 字段来源：`10.17医疗信息框架(4).docx`
+
+**v3.1 变更（相对 v3.0）**：**移除账号体系**——单机单用户场景下账号不提供真实安全（能坐在电脑前的人可以直接打开 db 文件），只增加使用摩擦。删除 `users` 表、`archive_records.owner_id`、登录/注册/游客流程；**保留 `user_activity_log` 操作留痕**（去掉 user_id 列）。同时修复 v3.0 遗留问题：DDL 补上正文引用的 `legacy_disease_staging` 建表语句、`schema_meta` 加主键与幂等写入。
 
 ---
 
@@ -19,7 +21,7 @@
 
 **三条铁律**（违反任何一条，集成必炸）：
 
-1. `ui_interface.py` 不得出现 `sqlite3`，不得读写 `data/users.json`，只能调 `DataStore` 方法。
+1. `ui_interface.py` 不得出现 `sqlite3`，数据库读写只能调 `DataStore` 方法。
 2. 所有可加密内容必须来自 §5 字段字典，业务代码不得临时造 `field_key`。
 3. 编码载荷必须是纯 ASCII；开放文本不许为了"看起来像英文"去手工翻译。
 
@@ -34,14 +36,13 @@
 | G1 | 界面中英分离 | 用户输入中文、看中文；DNA 编码与解码走英文/ASCII |
 | G2 | 加字段不改表 | 内容键值化，新增字段只在字典加一行 |
 | G3 | 一档双值 | 每个值同时存 `value_cn`（展示）与 `value_en`（编码） |
-| G4 | 档案有主 | 账号进库，档案带 `owner_id`，可查"谁的档案" |
-| G5 | 操作可追溯 | 登录、保存、编码、解码、删除全程留痕 |
-| G6 | 结构可迁移 | `schema_meta` 记录版本，支持增量升级 |
+| G4 | 操作可追溯 | 保存、编码、解码、删除全程留痕（`user_activity_log`） |
+| G5 | 结构可迁移 | `schema_meta` 记录版本，支持增量升级 |
 
 ### 1.2 明确不做（避免过度设计）
 
 - 不做服务端、不做多用户并发写同一档案（单机桌面应用）。
-- 不做真正的安全认证体系：账号只用于区分数据归属，不承担对抗性安全职责。
+- **不做账号体系（v3.1 定论）**：单机单用户下，账号既挡不住能物理接触电脑的人，也不参与"数据不出机 + DNA 编码 + 密钥哈希不落库"的真实防线，只增加每次启动的登录摩擦。若未来出现"一台电脑多操作员"的真实需求，再引入账号并补归属校验，不要提前设计。
 - 不做开放文本的机器翻译入库存档（需要英文报告时另做"导出翻译"功能）。
 - 不提前优化搜索：千条以内全表扫描可接受，FTS5 留到数据量上万再上。
 
@@ -72,46 +73,35 @@ DNA 编码器：json.dumps(ensure_ascii=True, sort_keys=True) → 纯 ASCII 载�
 ### 2.2 表关系
 
 ```
-schema_meta            结构版本（v3.0）
+schema_meta            结构版本（v3.1）
 
-users                  账号（username / password_hash / role / is_active）
-   │ owner_id
-   ▼
 archive_records        档案身份 + 状态（软删除）
    ├── record_entries   内容键值 ──> field_definitions  字段字典（60 条）
    ├── record_diseases  病症结果 ──> disease_terms      病症词典（236 条，term_key 不可变）
    └── dna_sequences    编码历史 ──> decode_records     解码历史（审计链）
 
-user_activity_log      操作留痕（登录/保存/编码/解码/删除/导出）
+user_activity_log      操作留痕（保存/编码/解码/删除/导出）
 ```
 
 ---
 
-## 3. 数据模型（9 张表）
+## 3. 数据模型（9 张表 + 1 张迁移暂存表）
 
 ### 3.1 `schema_meta` 结构版本
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| version | TEXT NOT NULL | 当前结构版本，如 `v3.0` |
+| version | TEXT NOT NULL | 当前结构版本，如 `v3.1` |
 | applied_at | TEXT NOT NULL | 应用时间 |
+
+> `version` 建为 **PRIMARY KEY**：防止重复写入同一版本行（v3.0 版本表无主键，重复执行建表脚本会出现两行同版本记录）。
+> 写入统一用 `INSERT ... SELECT ... WHERE NOT EXISTS`，保证幂等。
 
 `init_database()` 先读本表最后一行：为空 → 建全表并写入当前版本；低于当前版本 → 依次跑迁移。
 
-### 3.2 `users` 账号
+### 3.2 ~~`users` 账号~~（v3.1 已移除）
 
-| 字段 | 类型 | 约束 | 说明 |
-|---|---|---|---|
-| id | INTEGER | PK AUTOINCREMENT | |
-| username | TEXT | NOT NULL UNIQUE | 登录名，**存小写规范值**，判重前统一转小写 |
-| password_hash | TEXT | NOT NULL | 格式 `sha256$<salt_hex>$<hash_hex>`，**禁止明文** |
-| display_name | TEXT | DEFAULT '' | 显示名，空则等于 username |
-| role | TEXT | DEFAULT 'user' | `user` / `admin` |
-| is_active | INTEGER | DEFAULT 1 | 0 = 停用：保留数据，拒绝登录 |
-| created_at | TEXT | NOT NULL | 注册时间 |
-| last_login_at | TEXT | DEFAULT '' | 最近登录时间 |
-
-> 不存"游客"账号。游客是运行态，不落库。
+v3.0 曾设计账号表，v3.1 评估后移除（理由见 §1.2）。本节编号保留，避免全文编号漂移。
 
 ### 3.3 `archive_records` 档案身份与状态
 
@@ -121,7 +111,6 @@ user_activity_log      操作留痕（登录/保存/编码/解码/删除/导出�
 |---|---|---|---|
 | id | INTEGER | PK AUTOINCREMENT | |
 | record_id | TEXT | NOT NULL UNIQUE | 业务号 `ARCHIVE_{YYYYMMDD}_{NNN}` |
-| owner_id | INTEGER | NULL | 归属人 → `users.id`；NULL = 历史数据/游客数据 |
 | archive_number | TEXT | DEFAULT '' | 档案编号（用户填） |
 | name | TEXT | NOT NULL | 姓名 |
 | gender | TEXT | DEFAULT '' | `male` / `female` / `unknown` |
@@ -230,7 +219,7 @@ def _next_record_id(self, conn) -> str:
 | original_text | TEXT | 编码前明文（审计用） |
 | encoded_at | TEXT NOT NULL | |
 | is_valid | INTEGER DEFAULT 1 | 当前有效版本标记 |
-| payload_version | TEXT DEFAULT 'v2' | 载荷格式版本（**与文档版本无关，账号功能不改载荷结构**） |
+| payload_version | TEXT DEFAULT 'v2' | 载荷格式版本（**与文档版本无关，改文档不改载荷结构**） |
 | payload_mode | TEXT DEFAULT 'bilingual' | `bilingual` / `canonical_en` |
 
 > 重新编码不删旧行，只把旧行 `is_valid=0`。必须能回答"这条档案被编码过几次、每次什么参数"。
@@ -253,14 +242,16 @@ def _next_record_id(self, conn) -> str:
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | id | INTEGER | PK AUTOINCREMENT |
-| user_id | INTEGER NULL | → `users.id`；无主操作为 NULL |
 | action | TEXT NOT NULL | 见下枚举 |
 | target_record_id | TEXT DEFAULT '' | 关联档案号，可空 |
 | detail | TEXT DEFAULT '' | 补充说明（错误原因、导出格式等） |
 | created_at | TEXT NOT NULL | |
 
 **action 枚举（固定，不得在业务代码临时造值）**：
-`register` / `login` / `logout` / `create_record` / `update_record` / `delete_record` / `encode_dna` / `decode_dna` / `export_report` / `ai_extract`
+`create_record` / `update_record` / `delete_record` / `encode_dna` / `decode_dna` / `export_report` / `ai_extract` / `app_start` / `app_exit` / `backup_database`
+
+> v3.0 的 `register` / `login` / `logout` 随账号体系移除；新增 `app_start` / `app_exit` / `backup_database` 补足十枚举——单机应用里这三件事恰恰是最需要留痕的。
+> **留痕 ≠ 权限控制**：本地库文件理论上可被直接编辑，这是操作追溯，不是审计级防篡改。
 
 ---
 
@@ -271,25 +262,13 @@ def _next_record_id(self, conn) -> str:
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_meta (
-    version TEXT NOT NULL,
+    version TEXT NOT NULL PRIMARY KEY,
     applied_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    display_name TEXT DEFAULT '',
-    role TEXT DEFAULT 'user',
-    is_active INTEGER DEFAULT 1,
-    created_at TEXT NOT NULL,
-    last_login_at TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS archive_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     record_id TEXT NOT NULL UNIQUE,
-    owner_id INTEGER,
     archive_number TEXT DEFAULT '',
     name TEXT NOT NULL,
     gender TEXT DEFAULT '',
@@ -300,8 +279,7 @@ CREATE TABLE IF NOT EXISTS archive_records (
     source TEXT DEFAULT 'manual',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    is_deleted INTEGER DEFAULT 0,
-    FOREIGN KEY (owner_id) REFERENCES users(id)
+    is_deleted INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS field_definitions (
@@ -388,18 +366,31 @@ CREATE TABLE IF NOT EXISTS decode_records (
 
 CREATE TABLE IF NOT EXISTS user_activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
     action TEXT NOT NULL,
     target_record_id TEXT DEFAULT '',
     detail TEXT DEFAULT '',
     created_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    -- action 枚举的数据库级兜底（验收 T12 就是测它）
+    CHECK (action IN ('create_record', 'update_record', 'delete_record', 'encode_dna',
+                      'decode_dna', 'export_report', 'ai_extract',
+                      'app_start', 'app_exit', 'backup_database'))
+);
+
+-- v1 迁移期暂存表（仅迁移脚本使用；正文 §10.3 第 5 步引用的就是它）
+CREATE TABLE IF NOT EXISTS legacy_disease_staging (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_text TEXT NOT NULL,             -- v1 里的原始中文病症名
+    record_id TEXT NOT NULL,               -- 来源档案号
+    result_cn TEXT DEFAULT '',             -- 原结果
+    matched_term_id INTEGER,               -- 自动匹配上的词典 id，NULL = 未匹配
+    reviewed INTEGER DEFAULT 0,            -- 0 待审 / 1 已合并 / 2 已丢弃
+    FOREIGN KEY (matched_term_id) REFERENCES disease_terms(id)
 );
 
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_archive_name      ON archive_records(name);
-CREATE INDEX IF NOT EXISTS idx_archive_owner     ON archive_records(owner_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_archive_created   ON archive_records(created_at);
+CREATE INDEX IF NOT EXISTS idx_archive_deleted   ON archive_records(is_deleted, created_at);
 CREATE INDEX IF NOT EXISTS idx_archive_deleted   ON archive_records(is_deleted, created_at);
 CREATE INDEX IF NOT EXISTS idx_entries_record    ON record_entries(record_id);
 CREATE INDEX IF NOT EXISTS idx_entries_field     ON record_entries(field_key);
@@ -411,9 +402,12 @@ CREATE INDEX IF NOT EXISTS idx_disease_term      ON record_diseases(disease_term
 CREATE INDEX IF NOT EXISTS idx_dna_record        ON dna_sequences(record_id, is_valid);
 CREATE INDEX IF NOT EXISTS idx_dna_sequence      ON dna_sequences(dna_sequence);
 CREATE INDEX IF NOT EXISTS idx_decode_dna        ON decode_records(dna_record_id);
-CREATE INDEX IF NOT EXISTS idx_activity_user     ON user_activity_log(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_activity_time     ON user_activity_log(created_at);
 
-INSERT INTO schema_meta (version, applied_at) VALUES ('v3.0', datetime('now'));
+-- 幂等写入版本号（重复执行不会产生第二行）
+INSERT INTO schema_meta (version, applied_at)
+SELECT 'v3.1', datetime('now')
+WHERE NOT EXISTS (SELECT 1 FROM schema_meta WHERE version = 'v3.1');
 ```
 
 **不为 `value_cn` / `value_en` 建索引**：`LIKE '%关键词%'` 的前置通配符用不上 B-tree 索引，只会白占空间、拖慢写入。千条以内全表扫描在 10ms 量级。
@@ -571,8 +565,8 @@ def _connect(self) -> sqlite3.Connection:
 | R5 | 多值 `seq` 从 1 连续递增；单值固定 0；禁止重复槽位 |
 | R6 | 开放文本若无可靠英文，`value_en` **必须等于 `value_cn`**（不可留空），编码器负责转 ASCII |
 | R7 | 条目不做软删除：命中已有槽位即 `UPDATE` 覆盖；删除条目走物理 `DELETE` |
-| R8 | 新建档案必须写 `owner_id`；游客调用 `save_record` 直接拒绝并抛 `GuestWriteForbiddenError` |
-| R9 | 关键动作必须写 `user_activity_log`；日志写失败**不得阻断主流程**（内部吞异常并打印） |
+| R8 | 关键动作必须写 `user_activity_log`，`action` 取自 §3.10 枚举，禁止临时造值 |
+| R9 | 日志写失败**不得阻断主流程**（内部吞异常并打印）；日志与业务使用同一连接 + WAL 模式，避免"另一连接被锁后日志被静默丢弃" |
 
 ### 6.2 双语的边界
 
@@ -629,18 +623,16 @@ payload = json.dumps(payload_obj, ensure_ascii=True, sort_keys=True, separators=
 
 ---
 
-## 7. 权限规则
+## 7. 访问边界（v3.1）
 
-| 能力 | 游客 | 普通用户 | 管理员 |
-|---|---|---|---|
-| 填写 / 导入 / 编辑（内存态） | ✅ | ✅ | ✅ |
-| 档案落库 | ❌ 提示"请登录后保存" | ✅ 仅自己的 | ✅ 全部 |
-| 档案列表 | 仅本次会话临时数据 | 仅自己 `owner_id` 的 | 全部（含 NULL 历史数据） |
-| 编解码 DNA | ✅ | ✅ | ✅ |
-| 查看使用历史 | ❌ | 仅自己的 | 全部 |
-| 账号管理（停用 / 改角色） | ❌ | ❌ | ✅ |
+无账号体系，**不要对外宣称"权限控制"**：
 
-> 游客"不能落库"是刻意的：否则会产生大量无主档案，`owner_id` 语义失效且无法追溯。
+| 层级 | 做了什么 | 没做什么 |
+|---|---|---|
+| 操作留痕 | `log_activity` 记录编码/解码/删除等关键动作，可追溯 | 不是审计级不可篡改日志（本地库文件理论上可被直接编辑） |
+| 数据访问 | 单机单用户，启动即可用，无登录摩擦 | 无隔离——能物理接触这台电脑的人即可读写全部数据 |
+
+单机桌面应用的真实防线是**数据不出机 + DNA 编码 + 密钥哈希不落库**，账号不参与这道防线。
 
 ---
 
@@ -659,39 +651,24 @@ def get_connection(self) -> sqlite3.Connection         # 内部已执行 PRAGMA 
 def close(self) -> None
 ```
 
-### 8.2 账号与日志
+### 8.2 操作日志
 
 ```python
-def create_user(self, username: str, password: str, role: str = "user",
-                display_name: str = "") -> tuple[bool, str]
-    """返回 (成功, 中文提示)。用户名统一转小写判重；密码最短 6 位；内部生成盐并哈希。"""
-
-def verify_user(self, username: str, password: str) -> Optional[dict]
-    """成功返回 {id, username, display_name, role}；失败返回 None。
-    不区分"用户不存在 / 密码错误"，对外统一提示。"""
-
-def get_user(self, user_id: int = None, username: str = None) -> Optional[dict]
-def set_user_active(self, user_id: int, active: bool) -> bool
-def touch_last_login(self, user_id: int) -> None
-
-def log_activity(self, user_id: Optional[int], action: str,
+def log_activity(self, action: str,
                  target_record_id: str = "", detail: str = "") -> None
-    """action 必须取自 §3.10 枚举；内部捕获异常，不阻断主流程。"""
+    """action 必须取自 §3.10 枚举；内部捕获异常，不阻断主流程。单机单用户，无 user_id。"""
 
-def list_activity(self, user_id: Optional[int] = None, action: str = None,
+def list_activity(self, action: str = None,
                   limit: int = 50, offset: int = 0) -> tuple[list, int]
-    """user_id=None 表示全部（仅 admin 使用）；返回 (记录列表, 总数)。"""
+    """查询操作历史，返回 (记录列表, 总数)。"""
 ```
-
-**密码规则**：`password_hash` 格式 `sha256$<salt_hex>$<hash_hex>`，salt 为随机 16 字节；校验必须用存储串里的 salt 重算比对，**禁止明文比较**；任何位置（json、日志、界面提示）不得出现明文密码。
 
 ### 8.3 档案 CRUD
 
 ```python
-def save_record(self, record: ArchiveRecord, owner_id: Optional[int] = None) -> str
+def save_record(self, record: ArchiveRecord) -> str
     """单事务写入身份 + entries + diseases，返回 record_id。
-    不存在则生成 record_id；已存在则整条替换。owner_id 为 None 时用记录自带归属；
-    游客（无 owner 且未登录）抛 GuestWriteForbiddenError。"""
+    不存在则生成 record_id；已存在则整条替换。"""
 
 def load_record(self, record_id: str) -> Optional[ArchiveRecord]
     """返回完整档案；不存在或已软删返回 None。"""
@@ -702,10 +679,8 @@ def update_record(self, record: ArchiveRecord) -> bool
 def delete_record(self, record_id: str) -> bool
     """软删除 archive_records.is_deleted=1；entries/diseases 保留；写 delete_record 日志。"""
 
-def list_records(self, offset: int = 0, limit: int = 20, keyword: str = None,
-                 owner_id: Optional[int] = None) -> tuple[list[ArchiveRecord], int]
+def list_records(self, offset: int = 0, limit: int = 20, keyword: str = None) -> tuple[list[ArchiveRecord], int]
     """分页，返回 (items, 过滤后总数)。keyword 匹配 name/archive_number/id_number。
-    owner_id=None 表示不过滤（admin 用）；普通用户传自己的 id。
     items 只带身份 + entries，不加载 diseases（避免 N+1）。"""
 
 def update_meta(self, record_id: str, **fields) -> bool
@@ -792,66 +767,55 @@ class DataStoreError(Exception): ...
 class FieldKeyNotRegisteredError(DataStoreError): ...    # field_key 未登记或已停用
 class DuplicateSeqError(DataStoreError): ...             # 同 field_key 下 seq 重复
 class RecordNotFoundError(DataStoreError): ...
-class GuestWriteForbiddenError(DataStoreError): ...      # 游客尝试落库
 ```
 
 ---
 
-## 9. 账号与档案流程（前后端串联）
+## 9. 档案流程（前后端串联，v3.1 无账号版）
 
-### 9.1 注册
+### 9.1 启动
 
-界面弹窗 → 本地格式校验（非空、两次密码一致）→ `create_user()` →
-成功："注册成功，请登录"；失败：展示返回的中文提示。
-**注册不自动登录**（避免"刚注册就进主界面"导致权限状态含糊）。
+`app_start` 日志 → 直达主界面（无登录页）。启动即用，无任何前置步骤。
 
-### 9.2 账号登录
+### 9.2 保存档案
 
-弹窗 → `verify_user()` → 成功：`touch_last_login()` + `log_activity(login)` + 界面持有 `current_user`（含 `id`/`role`）→ 进入主界面。
+界面收集表单 → `data_classifier` 转 entries → `save_record(record)` →
+成功：`log_activity("create_record", record_id)`。
 
-### 9.3 游客登录
+### 9.3 编码 / 解码
 
-不调用数据库：`current_user = None`，`is_visitor = True` → 进入主界面。
-保存按钮改为拦截提示"游客模式不可保存，请登录后使用"。
+编码成功：`log_activity("encode_dna", record_id)`；
+解码成功：`log_activity("decode_dna", record_id)`；
+失败：`detail` 里写失败原因（如 `key mismatch`）。
 
-### 9.4 保存档案
+### 9.4 退出
 
-界面收集表单 → `save_record(record, owner_id=current_user.id)` →
-成功：`log_activity(create_record, record_id)`；游客调用直接短路，不写库。
-
-### 9.5 退出登录
-
-`log_activity(logout)` → 清空 `current_user` → 回登录页。
+`app_exit` 日志 → 正常关闭。
 
 ---
 
 ## 10. 迁移
 
-### 10.1 从 v2.1 / v2.0 库升级到 v3.0
+### 10.1 从 v3.0 / v2.x 库升级到 v3.1
 
 1. `init_database()` 读 `schema_meta` 最后一行；
-2. 若版本 < v3.0：
-   - 建 `users`、`user_activity_log`；
-   - `archive_records` 增加 `owner_id` 列（`ALTER TABLE ... ADD COLUMN`），既有行保持 NULL；
-   - 索引补齐（`idx_archive_owner`、`idx_activity_user`）；
-   - 写入新版本号。
-3. **不重建表、不清数据。**
+2. 若版本 < v3.1：
+   - 删除 `users` 表（`DROP TABLE IF EXISTS users`）；
+   - `archive_records` 删除 `owner_id` 列（SQLite 3.35+ 支持 `ALTER TABLE ... DROP COLUMN`；更老版本需建新表搬数据）；
+   - `user_activity_log` 重建（去掉 `user_id` 列），既有日志的 user_id 信息随迁移丢弃（单机无账号，本就无意义）；
+   - 删除 `data/users.json`（若存在）——**明文密码文件留在磁盘上比在库里的哈希更危险**；
+   - 索引补齐，写入新版本号。
+3. **不重建业务表、不清档案数据。**
 
-### 10.2 从 `data/users.json` 导入
-
-1. 首次启动时读取 `data/users.json`，逐条 `create_user()` 导入 `users` 表；
-2. 导入后重命名为 `users.json.migrated`，此后不再读写；
-3. 明文密码在导入时立即转为哈希，原文件建议由用户手动删除。
-
-### 10.3 从 v1 迁移档案（历史数据）
+### 10.2 从 v1 迁移档案（历史数据）
 
 顺序错误会直接跑不通，必须严格按此执行：
 
-1. 建 v3 表；
+1. 建 v3.1 表；
 2. 灌 60 条字段字典；
 3. 灌 236 条病症词典；
 4. 再迁档案数据（v1 的 23 个物理列 → §5 对应 `field_key`，7 个病症 → `record_diseases`，3 个随访 → `seq`）；
-5. v1 的脏中文病症名先进 `legacy_disease_staging` 暂存表，人工审核后再并入标准词典，**不得直接 INSERT 新词条**。
+5. v1 的脏中文病症名先进 `legacy_disease_staging` 暂存表（§4 DDL 已含建表语句），人工审核后再并入标准词典，**不得直接 INSERT 新词条**。
 
 ---
 
@@ -867,8 +831,8 @@ class GuestWriteForbiddenError(DataStoreError): ...      # 游客尝试落库
 | 6 | "外键在建表脚本里写了就够了" | 连接级设置，每个连接都要 `PRAGMA foreign_keys=ON` |
 | 7 | "多值字段直接存 JSON 数组更方便" | 无法查询、无法局部更新、协作时格式必错 |
 | 8 | "英文名改了没关系" | `english_name` 可改，`term_key` 不可改；载荷引用后者 |
-| 9 | "账号密码放 json 更简单" | 明文泄露 + 与档案脱节；必须进 `users` 表并存哈希 |
-| 10 | "游客也能保存，反正没人管" | 产生无主档案，`owner_id` 语义失效，无法追溯 |
+| 9 | "账号密码放 json 更简单" | **v3.1 已移除账号**：单机单用户下账号不提供真实安全，只增加摩擦；见 §1.2 |
+| 10 | "日志随便记点什么都行" | `action` 是 CHECK 约束的十枚举，临时造值直接被数据库拒绝 |
 
 ---
 
@@ -886,12 +850,12 @@ class GuestWriteForbiddenError(DataStoreError): ...      # 游客尝试落库
 | T8 | 写入未登记 `field_key` | 抛 `FieldKeyNotRegisteredError` |
 | T9 | 外键生效 | 插入不存在的 `record_id` 必须被拒绝（验证 PRAGMA 已开） |
 | T10 | v1 迁移 | 前后记录数一致；抽查 3 条 23 个字段全部落位；词典未被污染 |
-| T11 | 注册新账号 | `users` 新增 1 行；`users.json` 不再产生 |
-| T12 | 重复注册同名（含大小写差异） | 被拒，提示"该账号已存在" |
-| T13 | 游客登录后点保存 | 提示"游客模式不可保存"；`archive_records` 无新增 |
-| T14 | 普通用户被停用后登录 | 失败并提示"账号已停用"，数据仍保留 |
-| T15 | 普通用户查看列表 | 只出现自己 `owner_id` 的档案 |
-| T16 | 从 v2.1 库启动 | 自动补建 2 表 + `owner_id` 列 + 索引，既有档案 `owner_id` 为 NULL |
+| T11 | 保存档案后查日志 | `user_activity_log` 新增 1 行，`action='create_record'`，`target_record_id` 正确 |
+| T12 | 故意写非法 action（如 `'hack'`） | 被 CHECK 约束拒绝 |
+| T13 | 日志写入失败模拟（锁表） | 主流程不受影响；同连接 + WAL 下不产生静默丢失 |
+| T14 | 重复执行建表脚本 | `schema_meta` 仍只有 1 行 v3.1（幂等） |
+| T15 | 插入 v1 脏病症名到暂存表 | `legacy_disease_staging` 可写入；未审核不得并入 `disease_terms` |
+| T16 | 从 v3.0 库启动 | 自动删 `users`/`owner_id`、重建日志表，档案数据无丢失 |
 
 > T4 和 T9 是专门为踩过的坑设的。**没有这两条，前面全过也可能带着 bug 上线。**
 
@@ -901,12 +865,12 @@ class GuestWriteForbiddenError(DataStoreError): ...      # 游客尝试落库
 
 | 阶段 | 内容 | 责任 | 完成标志 |
 |---|---|---|---|
-| P1 | 建 9 张表 + 索引 + `schema_meta`（v3.0）；`_connect()` 每连接开外键 | 数据库同学 | 空库可建，T9 通过 |
+| P1 | 建 9 表 + 暂存表 + 索引 + `schema_meta`（v3.1）；`_connect()` 每连接开外键 | 数据库同学 | 空库可建，T9、T14 通过 |
 | P2 | 灌 60 条字段字典 + 236 条病症词典（种子文件放 `docs/seed/`，避免 `data/` 被 gitignore） | 数据库同学 | 字典可查，重复执行幂等 |
 | P3 | `save_record` / `load_record` / `update_record` / `list_records` / `upsert_entries`（单事务 + R1/R4/R5/R7） | 数据库同学 | T1–T4、T7、T8 通过 |
-| P4 | 账号与日志：`create_user` / `verify_user` / `log_activity` / `list_activity`；`owner_id` 落库 | 数据库同学 | T11–T15 通过 |
-| P5 | 迁移：v2.1 → v3.0、`users.json` → `users`、v1 档案 | 数据库同学 | T10、T16 通过 |
-| P6 | 界面：删 `_load_users`/`_save_users`，改调 `DataStore`；保存前判游客；登录态传 `owner_id` | 前端同学 | 三个登录入口可用，保存落库 |
+| P4 | 操作日志：`log_activity` / `list_activity`（同连接 + WAL，吞异常） | 数据库同学 | T11–T13 通过 |
+| P5 | 迁移：v3.0/v2.x → v3.1、v1 档案 | 数据库同学 | T10、T15、T16 通过 |
+| P6 | 界面：改调 `DataStore`，保存/编码/解码入口调 `log_activity`；**无登录页，启动直达主界面** | 前端同学 | 保存落库，日志可查 |
 | P7 | `data_classifier`：表单/AI 结果 → entries（中文标签映射、枚举规范化、seq 对齐） | 集成负责人 | 表单能真正写进 `record_entries` |
 | P8 | DNA 按 §6.3 生成载荷，接 `dna_codec` | 编解码同学 + 集成负责人 | T6 通过 |
 
@@ -920,9 +884,7 @@ class GuestWriteForbiddenError(DataStoreError): ...      # 游客尝试落库
 |---|---|---|
 | 1 | DNA 编码器单条序列容量上限 | 待编解码同学给数值，据此定默认 `bilingual` 还是 `canonical_en` |
 | 2 | 性别/血型是否对接国标编码 | 暂用 `male/female/unknown`、`A/B/AB/O` |
-| 3 | 游客操作是否留痕 | 默认不记（日志无噪音） |
-| 4 | 普通用户能否看 `owner_id` 为 NULL 的历史数据 | 默认不能，仅 admin 可见 |
-| 5 | 新 `field_key` 是否必须走 PR 审批 | 默认必须，禁止业务代码临时造 key |
+| 3 | 新 `field_key` 是否必须走 PR 审批 | 默认必须，禁止业务代码临时造 key |
 
 ---
 
@@ -932,7 +894,7 @@ class GuestWriteForbiddenError(DataStoreError): ...      # 游客尝试落库
 |---|---|
 | `medical_archive_database_design.md` | 表结构说明、字段字典 60 个、8 条设计取舍、R1–R7、误区清单、验收用例 |
 | `database_v2_design.md` v2.1 | 完整 DDL、索引、接口签名、`record_id` 生成算法、迁移细则、`PRAGMA` 说明 |
-| `user_account_module_design.md` | `users` / `user_activity_log` / `owner_id`、权限表、账号流程、T11–T16 |
+| `user_account_module_design.md` | `user_activity_log` 操作留痕（v3.1 保留）；账号/权限部分已随 v3.1 评估移除 |
 | `10.17医疗信息框架(4).docx` | 字段来源与分组依据 |
 
 **归档建议**：上述前三份移入 `docs/modules/archive/`，标题加"已归档，见 `database_master_design.md`"，避免队友误用旧稿。

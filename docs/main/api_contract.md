@@ -7,29 +7,40 @@
 | 文档信息 | 内容 |
 |---------|------|
 | **项目名称** | DNA医疗档案系统 |
-| **文档版本** | **v3.0** |
+| **文档版本** | **v3.1 历史冻结版**（§8 为 v4.1 现行数据层接口） |
 | **基于SDD** | SDD.md v1.0 |
-| **配套设计** | `docs/modules/database_master_design.md` v3.0（唯一数据库依据） |
-| **编写日期** | 2026-10-13（v1.0） / 2026-11-02（v2.1） / 2026-11-06（v3.0） |
-| **文档状态** | **已冻结，可作为开发依据** |
+| **配套设计** | `../02_数据库_开发书/00_数据库开发书_最终版_v4.0.md`（内容 v4.1，**唯一数据库施工依据**） |
+| **编写日期** | 2026-10-13（v1.0） / 2026-11-02（v2.1） / 2026-11-06（v3.0） / 2026-11-13（v3.1） / 2026-11-17（§8 v4.1） |
+| **文档状态** | **历史冻结版；仅 §8 与 3 条硬边界可直接引用** |
 
-### v3.0 变更说明（相对 v2.1）
+> ⛔ **读之前必看（2026-11-17）**
+> 1. 本文 §1–§7 与附录描述的是 **v3.1 键值模型**（`ArchiveRecord(entries/diseases)`、`field_definitions`、`users`），**已作废**。数据库已改为 v4.1 的 `sections/fields/options/answers` 结构化模型（8 表头 / 16 空全枚举，无账号体系）。**照 §4 写数据层，联调必炸。**
+> 2. 旧头部写的「配套设计 = `database_master_design.md` v3.1」那份文件**不在交接包内**，且口径已废，不要去找、不要引用。
+> 3. **现行数据层接口一律看本文 §8**（4 个 `answers` 接口）；数据库结构一律看 `02_数据库_开发书/00_…_最终版_v4.0.md`（内容 v4.1）。
+> 4. 3 条硬边界仍然有效：UI 不许直连 `sqlite3`、AI 不许 `import data_store`、字段 key 只从字典取。
 
-**本次的核心是「档案有主」：新增账号体系与操作留痕，7 张表变 10 张。CRUD 方法只加可选参数，不加则行为不变。**
+### v3.1 变更说明（相对 v3.0：移除账号体系，保留操作日志）
+
+**设计结论：单机单用户场景下账号体系不提供真实安全（能坐在电脑前的人可以直接打开 db 文件），只增加使用摩擦。本次移除 `users` 表、登录注册与 `owner_id` 归属；保留 `user_activity_log` 审计日志——医疗档案的留痕追溯价值真实存在，且零使用成本。**
 
 | # | 位置 | 变更 | 对已有代码的影响 |
 |---|------|------|-----------------|
-| 1 | §4.2 新增「账号与操作日志」 | `create_user` / `verify_user` / `get_user` / `set_user_active` / `touch_last_login` / `log_activity` / `list_activity` | 纯新增 |
-| 2 | §4.2 档案 CRUD | `save_record(record, owner_id=None)`、`list_records(..., owner_id=None)` | 参数有默认值，旧调用不报错 |
-| 3 | §4.2 `ArchiveRecord` | 新增 `owner_id: Optional[int]` 字段 | 有默认值，构造方式不变 |
-| 4 | §3.2 前端 | 新增注册 / 登录 / 游客 / 退出 四个回调 | 前端需补登录页逻辑 |
-| 5 | §4.2 异常 | 新增 `GuestWriteForbiddenError` | 保存入口需捕获 |
-| 6 | §7 | 字段字典仍为唯一字段来源（v2.1 已生效），本次不变 | 无 |
+| 1 | §4.2 | 删除 `create_user` / `verify_user` / `get_user` / `set_user_active` / `touch_last_login`；**保留** `log_activity` / `list_activity`（去掉 user_id 参数） | 删掉相关调用即可 |
+| 2 | §4.2 档案 CRUD | `save_record(record)` / `list_records(offset, limit, keyword)` 恢复 v2.1 签名 | 删掉 owner_id 实参 |
+| 3 | §4.2 `ArchiveRecord` | 删除 `owner_id` 字段 | 删掉相关赋值 |
+| 4 | §3.2 前端 | 删除注册 / 登录 / 游客 / 退出回调、`ViewType.LOGIN`、`current_user` / `is_visitor` | 删除登录页与相关逻辑 |
+| 5 | §4.2 异常 | 删除 `GuestWriteForbiddenError` | 删掉捕获 |
+| 6 | 数据库 | `users` 表、`archive_records.owner_id` 删除；`user_activity_log` 去掉 `user_id` 列 | 以 v3.1 DDL 为准 |
 
-**两条容易踩的约定**：
+**两条不变的约定**：
 
-1. **载荷格式版本固定为 `v2`**，与文档版本 v3.0 **无关**。文档加账号不改 DNA 载荷结构，贸然升 `v3` 会让历史序列解码校验失败。
-2. **游客不能落库**：`save_record` 在无归属时抛 `GuestWriteForbiddenError`，否则会产生大量无主档案，`owner_id` 语义失效。
+1. **载荷格式版本固定为 `v2`**，与文档版本号无关。改文档不改 DNA 载荷结构，贸然升 `v3` 会让历史序列解码校验失败。
+   > **修订**：此条已被 **§8.3** 取代——answers 模型重构后 `payload_version` 升至 `v3`（无历史编码数据，无兼容负担）。本条仅描述 v3.1 时代口径。
+2. **`log_activity` 写失败不得阻断主流程**（接口内部吞异常），且日志与业务使用同一连接 + WAL 模式，避免日志被静默丢弃。
+
+### v3.0 变更说明（已被 v3.1 部分撤销，仅存档）
+
+v3.0 曾引入账号体系（users 表、owner_id 归属、登录注册回调）。经评估：单机单用户下账号不提供真实安全、只增加摩擦，**v3.1 已将其移除**；操作日志保留。历史说明见 git 记录与 `数据库开发书` 版本演进。
 
 ### v2.1 变更说明
 
@@ -95,9 +106,9 @@
 
 **独立模块（不依赖其他业务模块）**：`data_store`、`ollama_api`、`dna_codec`、`core/*`
 
-**三条硬边界（v3.0，违反必炸）**：
+**三条硬边界（v3.1，违反必炸）**：
 
-1. `ui_interface.py` 不得出现 `sqlite3`，不得读写 `data/users.json`，账号与档案只能走 `DataStore`；
+1. `ui_interface.py` 不得出现 `sqlite3`，数据库读写只能走 `DataStore`；
 2. `ollama_api.py` 不得 import `data_store`，字段清单由调用方通过 `fields_hint` 传入；
 3. 所有可加密内容的 `field_key` 必须来自字段字典，业务代码不得临时造 key。
 
@@ -112,7 +123,7 @@
 | IF-03 | 返回值类型必须严格符合约定 |
 | IF-04 | 异常类型必须显式声明在 docstring 中 |
 | IF-05 | 所有涉及IO操作的方法必须有超时机制 |
-| IF-06 | **新增参数必须带默认值**，旧调用不传即保持原行为（v3.0 的 `owner_id` 即按此规则加入） |
+| IF-06 | **新增参数必须带默认值**，旧调用不传即保持原行为 |
 | IF-07 | **文档版本号与数据格式版本号分离**：改文档不动载荷；动载荷才升 `payload_version` |
 
 ---
@@ -163,30 +174,12 @@ def __init__(
 
 **ViewType 枚举值**：
 - `ViewType.SPLASH` - 开场动画页
-- `ViewType.LOGIN` - 登录页
 - `ViewType.MAIN` - 主界面（加密/解密选择）
 - `ViewType.ENCRYPT` - 加密操作页
 - `ViewType.DECRYPT` - 解密操作页
 - `ViewType.PROFILE` - 个人中心页
 
-#### 账号与登录回调（v3.0 新增）
-
-| 方法签名 | 返回值 | 说明 |
-|---------|--------|------|
-| `on_register(username: str, password: str, display_name: str = "") -> bool` | bool | 注册账号；失败时由界面弹提示（提示文案取 `create_user` 返回的第二项） |
-| `on_login(username: str, password: str) -> bool` | bool | 账号登录；成功后写 `touch_last_login` + `log_activity(login)` |
-| `on_guest_login() -> None` | None | 游客进入，**不调用数据库**，`current_user = None`、`is_visitor = True` |
-| `on_logout() -> None` | None | 写 `log_activity(logout)` → 清空 `current_user` → 回登录页 |
-
-**运行态字段（不属于持久化数据）**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `current_user` | Optional[dict] | 登录用户 `{id, username, display_name, role}`；游客为 `None` |
-| `is_visitor` | bool | 游客标记；`True` 时保存按钮必须拦截 |
-
-> 游客"不能落库"是刻意的：否则会产生大量无主档案，`owner_id` 语义失效且无法追溯。
-> `HealthArchiveApp` **不得**读写 `data/users.json`，也不得 `import sqlite3`，账号只能通过 `DataStore`。
+> v3.1 起无登录页：单机单用户，启动直达 `MAIN`。操作留痕由 `log_activity` 在各动作入口自动完成，用户无感。
 
 #### 加密流程回调
 
@@ -196,7 +189,7 @@ def __init__(
 | `on_text_input(text: str) -> None` | None | 文本输入回调 |
 | `on_image_uploaded(image_path: str) -> None` | None | 图片上传完成回调（预留OCR） |
 | `on_trigger_ai_extract(raw_text: str) -> None` | None | 触发AI字段提取（异步） |
-| `on_save_record(record: ArchiveRecord) -> str` | str | 保存档案记录，返回 record_id；内部传 `owner_id=self.current_user["id"]`，游客直接拦截 |
+| `on_save_record(record: ArchiveRecord) -> str` | str | 保存档案记录，返回 record_id |
 | `on_encode_dna(record: ArchiveRecord, key: str) -> None` | None | 执行DNA编码（异步任务）；`key` 由 `DNACodec.generate_key()` 生成 |
 | `on_encode_complete(task_id: str, result: dict) -> None` | None | DNA编码完成回调 |
 
@@ -330,26 +323,20 @@ def __init__(self, db_path: str = None, data_dir: str = None) -> None
 | `get_connection() -> sqlite3.Connection` | Connection | 获取连接（行工厂返回 dict，**内部已执行 `PRAGMA foreign_keys = ON`**） |
 | `close() -> None` | None | 关闭数据库连接 |
 
-#### 账号与操作日志（v3.0 新增）
+#### 操作日志（v3.0 引入；v3.1 移除账号后保留）
 
 | 方法签名 | 返回值 | 说明 | 异常 |
 |---------|--------|------|------|
-| `create_user(username: str, password: str, role: str = "user", display_name: str = "") -> tuple[bool, str]` | tuple[bool, str] | 注册；返回 `(是否成功, 中文提示)`。用户名统一转小写判重，密码最短 6 位，内部生成盐并哈希 | - |
-| `verify_user(username: str, password: str) -> Optional[dict]` | Optional[dict] | 登录校验；成功返回 `{id, username, display_name, role}`，失败返回 `None`。**不区分"用户不存在"与"密码错误"** | - |
-| `get_user(user_id: int = None, username: str = None) -> Optional[dict]` | Optional[dict] | 按 id 或用户名取用户信息（不含 `password_hash`） | - |
-| `set_user_active(user_id: int, active: bool) -> bool` | bool | 停用 / 启用账号；停用后保留数据但拒绝登录 | - |
-| `touch_last_login(user_id: int) -> None` | None | 更新 `last_login_at` | - |
-| `log_activity(user_id: Optional[int], action: str, target_record_id: str = "", detail: str = "") -> None` | None | 写操作日志；`action` 必须取自下表枚举。**写失败不得阻断主流程**（内部吞异常） | - |
-| `list_activity(user_id: Optional[int] = None, action: str = None, limit: int = 50, offset: int = 0) -> tuple[list, int]` | tuple | 查询操作历史，返回 `(列表, 总数)`；`user_id=None` 表示全部（仅 admin 使用） | - |
+| `log_activity(action: str, target_record_id: str = "", detail: str = "") -> None` | None | 写操作日志（单机单用户，无 user_id）；`action` 必须取自下表枚举。**写失败不得阻断主流程**（内部吞异常），日志与业务同一连接 + WAL 模式 | - |
+| `list_activity(action: str = None, limit: int = 50, offset: int = 0) -> tuple[list, int]` | tuple | 查询操作历史，返回 `(列表, 总数)` | - |
 
 **`action` 枚举（固定，不得在业务代码临时造值）**：
 
-`register` / `login` / `logout` / `create_record` / `update_record` / `delete_record` / `encode_dna` / `decode_dna` / `export_report` / `ai_extract`
+`create_record` / `update_record` / `delete_record` / `encode_dna` / `decode_dna` / `export_report` / `ai_extract` / `app_start` / `app_exit` / `backup_database`
 
-**`password_hash` 存储格式**：`sha256$<salt_hex>$<hash_hex>`，salt 为随机 16 字节。
-校验必须用存储串里的 salt 重算比对，**禁止明文比较**；任何位置（json、日志、界面提示）不得出现明文密码。
-
-> 实现建议：用 `hashlib.pbkdf2_hmac('sha256', pwd, salt, 200_000)` 代替单轮 sha256，格式不变、成本几乎为零。
+> v3.0 的 `register` / `login` / `logout` 三个枚举随账号体系一并移除；新增 `app_start` / `app_exit` / `backup_database` 补足十枚举——单机应用里这三件事恰恰是最需要留痕的。
+>
+> **日志的定位要讲准确**：这是**操作留痕 / 审计追溯**（"谁在什么时候编码、解码、删了哪条档案"），不是权限控制，也不承诺防篡改（本地库文件理论上可被直接编辑）。
 
 #### 字段字典操作（v2.1 新增）
 
@@ -426,14 +413,14 @@ def __init__(self, db_path: str = None, data_dir: str = None) -> None
 
 #### 档案记录 CRUD
 
-> **v3.0 说明：5 个方法名与返回值全部不变，只为 `save_record` / `list_records` 增加了带默认值的 `owner_id` 参数——旧调用不传则不报错。**
+> **v3.1 说明：5 个方法签名与 v2.1 完全一致（owner_id 参数已随账号体系移除）。**
 
 | 方法签名 | 返回值 | 说明 |
 |---------|--------|------|
-| `save_record(record: ArchiveRecord, owner_id: Optional[int] = None) -> str` | str | 保存/更新档案，返回 record_id。单事务写入身份 + entries + diseases。`owner_id` 为空时取 `record.owner_id`；两者都为空视为游客，抛 `GuestWriteForbiddenError` |
+| `save_record(record: ArchiveRecord) -> str` | str | 保存/更新档案，返回 record_id。单事务写入身份 + entries + diseases |
 | `load_record(record_id: str) -> Optional[ArchiveRecord]` | Optional[ArchiveRecord] | 加载档案记录；不存在或已软删返回 None |
-| `delete_record(record_id: str) -> bool` | bool | 删除档案记录（软删除，`is_deleted=1`） |
-| `list_records(offset: int = 0, limit: int = 20, keyword: str = None, owner_id: Optional[int] = None) -> tuple[list[ArchiveRecord], int]` | tuple | 列出档案（分页），返回 (列表, 过滤后总数)。`owner_id=None` 表示不过滤（admin 用），普通用户传自己的 id |
+| `delete_record(record_id: str) -> bool` | bool | 删除档案记录（软删除，`is_deleted=1`），成功后调 `log_activity("delete_record", record_id)` |
+| `list_records(offset: int = 0, limit: int = 20, keyword: str = None) -> tuple[list[ArchiveRecord], int]` | tuple | 列出档案（分页），返回 (列表, 过滤后总数) |
 | `update_record(record: ArchiveRecord) -> bool` | bool | 全量更新档案记录（entries/diseases 先删后插） |
 
 **v2.1 新增的局部更新方法**：
@@ -477,7 +464,6 @@ class DiseaseResult:
 class ArchiveRecord:
     # ── 身份字段：保留为属性（列表、搜索、排序、身份核验用）
     record_id: str = ""
-    owner_id: Optional[int] = None  # v3.0：归属账号，None = 历史数据 / 游客
     archive_number: str = ""
     name: str = ""
     gender: str = ""              # male / female / unknown
@@ -508,7 +494,7 @@ class ArchiveRecord:
 
 | 分类 | 字段 | 存哪里 |
 |------|------|--------|
-| 身份（7+6） | record_id, **owner_id**, archive_number, name, gender, nation, id_number, residence_address, create_date, source, created_at, updated_at, is_deleted | `archive_records` 物理列 |
+| 身份（7+5） | record_id, archive_number, name, gender, nation, id_number, residence_address, create_date, source, created_at, updated_at, is_deleted | `archive_records` 物理列 |
 | 内容（53） | `entries[field_key]`，见 `database_v2_design.md` §5.2~§5.9 | `record_entries` 键值行 |
 | 病症 | `diseases` 列表 | `record_diseases` |
 
@@ -523,18 +509,16 @@ class DataStoreError(Exception): ...
 class FieldKeyNotRegisteredError(DataStoreError): ...   # field_key 不在字典或已停用
 class DuplicateSeqError(DataStoreError): ...            # 同一 field_key 下 seq 重复
 class RecordNotFoundError(DataStoreError): ...
-class GuestWriteForbiddenError(DataStoreError): ...     # v3.0：游客尝试落库
 ```
 
-**权限边界（v3.0，必须如实理解，不要对外宣称"权限控制"）**：
+**访问边界（v3.1，必须如实理解，不要对外宣称"权限控制"）**：
 
 | 层级 | 做了什么 | 没做什么 |
 |---|---|---|
-| `list_records` | 按 `owner_id` 过滤，普通用户只能列出自己的档案 | — |
-| `load_record` / `update_record` / `delete_record` | **不校验归属** | 知道 record_id 就能读写 |
-| `user_activity_log` | 记录动作与操作者 | 不是审计级不可篡改日志 |
+| 操作留痕 | `log_activity` 记录编码/解码/删除等关键动作，可追溯 | 不是审计级不可篡改日志（本地库文件理论上可被直接编辑） |
+| 数据访问 | 无账号体系：单机单用户，启动即可用，无登录摩擦 | 无隔离——能物理接触这台电脑的人即可读写全部数据 |
 
-单机桌面应用的账号只用于**区分数据归属**，不承担对抗性安全职责。若后续要加固，给这三个方法加可选 `user_id` 参数做归属断言即可（向后兼容），不要在界面层拼权限判断。
+单机桌面应用的真实防线是**数据不出机 + DNA 编码 + 密钥哈希不落库**，账号不参与这道防线。若未来出现"一台电脑多操作员"的真实需求，再引入账号并给 `load/update/delete` 补归属校验，不要提前设计。
 
 #### DNA序列存储
 
@@ -758,8 +742,8 @@ def __init__(
 >
 > **`ensure_ascii=True` 是硬要求**：没有它，中文会以 UTF-8 原文进入编码器，C++ 侧处理不一致，且不同平台字节序不同导致同一档案编码结果不一致。
 >
-> **v3.0 补充：载荷格式版本固定为 `"v": "v2"` / `payload_version="v2"`。**
-> 文档版本从 v2.1 升到 v3.0 是因为加了账号体系，**DNA 载荷结构一个字节都没变**。
+> **载荷格式版本固定为 `"v": "v2"` / `payload_version="v2"`。**
+> 文档版本从 v2.1 一路升到 v3.1，**DNA 载荷结构一个字节都没变**。
 > 贸然把载荷写成 `"v3"` 会让已编码的历史序列在解码校验时全部失败——文档版本号 ≠ 数据格式版本号，两者不要联动。
 
 **identity_info 参数要求**（generate_key）：
@@ -957,12 +941,9 @@ class DataClassifier:
 | 调用方 | 被调用方 | 方法 | 用途 |
 |-------|---------|------|------|
 | ui_interface | data_store | `list_field_definitions(section)` | **v2.1 新增**：动态渲染表单分组 |
-| ui_interface | data_store | `create_user(username, password)` | **v3.0 新增**：注册 |
-| ui_interface | data_store | `verify_user(username, password)` | **v3.0 新增**：登录校验 |
-| ui_interface | data_store | `touch_last_login(user_id)` / `log_activity(...)` | **v3.0 新增**：登录留痕 |
-| ui_interface | data_store | `save_record(record, owner_id)` | 保存档案（带归属） |
+| ui_interface | data_store | `save_record(record)` | 保存档案 |
 | ui_interface | data_store | `load_record(record_id)` | 加载档案（编辑时） |
-| ui_interface | data_store | `list_records(offset, limit, keyword, owner_id)` | 档案列表分页（按归属过滤） |
+| ui_interface | data_store | `list_records(offset, limit, keyword)` | 档案列表分页 |
 | ui_interface | data_store | `upsert_entries(record_id, entries)` | **v2.1 新增**：局部更新内容 |
 | ui_interface | data_store | `parse_document(file_path)` | 解析上传文档 |
 | ui_interface | data_store | `save_upload_file(content, filename)` | 保存上传文件 |
@@ -978,16 +959,15 @@ class DataClassifier:
 | error_corrector | data_store | `find_similar_records(text)` | 相似档案比对 |
 | error_corrector | ollama_api | `correct_errors(...)` | AI纠错推断 |
 | main | data_store | `init_database()` / `init_field_definitions()` / `init_disease_terms()` | **启动初始化（顺序不能乱）** |
-| main | data_store | `import_users_from_json()`（迁移期一次性） | **v3.0 新增**：把 `data/users.json` 并入 `users` 表后改名 `.migrated` |
+| 各业务模块 | data_store | `log_activity(action, target_record_id, detail)` | 关键动作落审计日志（编码/解码/删除等） |
 
 ### 启动初始化顺序（`main.py`）
 
 ```python
 data_store = DataStore(db_path, data_dir)
-data_store.init_database()            # 1. 建表 + schema_meta（v2.1 库会自动补 owner_id / users / 日志表）
+data_store.init_database()            # 1. 建表 + schema_meta
 data_store.init_field_definitions()   # 2. 灌字段字典（60 条）——必须先于任何档案写入
 data_store.init_disease_terms()       # 3. 灌病症词典（236 条）
-# data_store.import_users_from_json() # 4. 仅首次：迁移旧的 data/users.json，之后不再调用
 
 ai_client = OllamaClient(model="qwen2.5:7b-instruct")
 dna_codec = DNACodec(exe_dir=EXE_DIR)
@@ -1002,5 +982,63 @@ app.start()
 
 ---
 
-*本文档 v3.0，与 `docs/modules/database_master_design.md` v3.0 配套，是模块对接的唯一依据。*
-*v2.1 及更早版本契约已作废；v1 历史数据迁移见 `database_master_design.md` §10。*
+---
+
+## 8. v4.1 数据层接口（现行，优先于 §4）
+
+> 本节 2026-11-17 定稿，对应 `02_数据库_开发书/00_…_最终版_v4.0.md`（内容 v4.1）。
+> §4 的 `DataStore.save_record(dict)` / `ArchiveRecord(entries/diseases)` / `field_definitions` 系列接口**全部作废**，以本节为准。
+> 变更来源：`02_数据库_开发书/99_待确定清单.md` TBD-A1（已关闭）。
+
+### 8.1 口径变化（一句话）
+
+档案不再是「一个 dict 存 60 个键值」，而是 **8 表头 / 16 个空（全部枚举型）**；用户勾选的每个选项在 `answers` 里落成一行，`options` 表提供候选项。**没有 `value` 自由文本分支**。
+
+### 8.2 四个接口（`DataStore`）
+
+```python
+def get_form_schema(section_key=None) -> dict:
+    """给前端渲染表单：{"sections": [...], "fields": [...], "options": [...]}
+    sections  8 条表头，含层级与 sort_order
+    fields    16 个空，含 field_key / label_cn / section_key / value_type / is_required / sort_order
+    options   各枚举空的候选项，含 option_key / name_cn / name_en / source / icd_code?
+    注意：options 未灌装时返回空列表，前端应提示「字典未就绪」，不要渲染空白下拉框。"""
+
+def save_answers(record_id, answers) -> dict:
+    """answers = [{"field_key": str, "option_keys": [...]}, ...]
+    同一空多选以 seq 区分顺序；返回 {"saved": int, "skipped": [...]}。
+    必须在单个事务内写入；引用不存在的 record_id / field_key / option_key 要抛异常，不许静默丢。"""
+
+def load_answers(record_id) -> list:
+    """展示用答案：[{"field_key", "display", "seq"}]，display 为选项中文名。"""
+
+def export_payload(record_id) -> dict:
+    """供 DNA 编码：{section_key.field_key: [option_key, ...]}。
+    全部为 ASCII option_key，不含中文，直接交给 dna_codec.py 序列化。"""
+```
+
+### 8.3 载荷与 DNA 编码
+
+- `payload_version` 从 `v2` 升到 **`v3`**（answers 模型改变了载荷结构；当前无历史编码数据，无兼容负担）。
+- **文档版本 ≠ 载荷版本**：契约文档后续升 v4.2 / v5 都不动 `payload_version`，只有载荷结构变化才升。
+- 交给 C++ 的必须是**纯 ASCII 英文串**（C++ 按字节做 8 位 ASCII 展开，中文会乱码）；`option_key` 天然满足，不要再传中文标签。
+- 编码结果受 `srand(time(0))` 影响**不可复现**，验收以「往返还原一致 + 结构约束」为准，不要比对固定序列。
+- 桌面直调：`dna_codec.py` 用同进程 `subprocess` 调 C++ exe，**不经 HTTP / Flask / 浏览器**，协议见 `04_DNA编解码_核心算法/C++调用协议.md`。
+
+### 8.4 硬边界（沿用，仍然有效）
+
+1. UI 不许直连 `sqlite3`（现 `ui_interface.py` 第 136/153 行违反，需改为调 DataStore）。
+2. AI 模块不许 `import data_store`，字段清单由调用方以 `fields_hint` 传入。
+3. 字段 key 只从 `fields` / `options` 字典取，不许前端硬编码。
+
+### 8.5 并行开发前的确认项（首日全员过一遍）
+
+- [ ] 四个接口的异常类型与返回值字段确认
+- [ ] `export_payload()` 的序列化串格式定稿（键顺序、多值分隔符），并写进 `dna_codec.py` 注释
+- [ ] `payload_version = "v3"` 写入载荷头
+- [ ] 确认后本节标记为冻结，4 个模块按此并行
+
+---
+
+*本文 §1–§7 为 v3.1 历史冻结内容，仅供追溯；§8 为 v4.1 现行数据层接口。*
+*数据库唯一施工依据：`02_数据库_开发书/00_数据库开发书_最终版_v4.0.md`（内容 v4.1）。*
