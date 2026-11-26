@@ -107,6 +107,5 @@ int main()
 	remove();
 	string ans_num = jiemi_num();
 	fuyuan(ans_num);
-	system("pause");
 	return 0;
 }

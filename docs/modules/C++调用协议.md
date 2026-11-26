@@ -133,7 +133,9 @@ Please enter the ciphertext: Please enter the key: ========--------------[ Decry
 
 解析：找到含 `[ Decryption Result ]` 的那一行，取**下一行**作为明文。
 
-⚠️ `DNA_decoder.cpp` 末尾有 `system("pause")`，在 subprocess 下可能挂起或往 stdout 追加 `Press any key to continue...`。中文 Windows 下这句提示是 **GBK 编码字节**：若 `subprocess.run` 只写 `encoding="utf-8"` 而缺 `errors="replace"`，会直接抛 `UnicodeDecodeError`、`stdout` 变成 `None`（实测 2026-11-19）。**实现 `dna_codec.py` 前应删掉这一行**（顺带可以把两句 `Please enter...` 提示去掉，让输出更干净）；若暂时不改 C++，务必保留 `timeout` 与 `errors="replace"`，且只按结果行解析。
+✅ **已修复（2026-11-26）**：`DNA_decoder.cpp` 末尾的 `system("pause")` 已删除并重编译，`bin/dna_decoder.exe` 为新版。实测 stdout 只剩 2 行（第 1 行含 `Decryption Result` 与两句 `Please enter...` 提示，第 2 行为结果正文），不再有 `Press any key to continue...` 的 GBK 乱码行，长载荷也不会被截断。
+
+> 历史坑位留档：该行在 subprocess 下曾导致 ①stdout 追加 GBK 字节使 `encoding="utf-8"` 抛 `UnicodeDecodeError`、`stdout=None`；②偶发截断长结果（实测 324 字符只还原 265）。写 `dna_codec.py` 时仍建议保留 `timeout` + `errors="replace"`，只按结果行解析，不要依赖行内固定位置。
 
 > 实测记录：`HELLO_DNA_TEST` / `KEY123` → 序列长 56、GC 0.5、字符集仅 ATCG → 按下方 `decode()` 解析还原为 `HELLO_DNA_TEST`，往返一致。因 `srand(time(0))`，同一输入每次序列不同，验收只断言结构不变量与往返一致，不比对固定序列。
 
@@ -187,7 +189,7 @@ def decode(sequence: str, key: str) -> str:
 
 - [ ] 两个 exe 都能编译，放到仓库根 `bin/` 并提交 GitHub，从任意工作目录启动主程序都找得到
 - [ ] `encode()` 能解析 5 个字段，非法字符断言生效
-- [ ] `decode()` 用 stdin 两行输入，能拿到明文；`system("pause")` 已处理
+- [x] `decode()` 用 stdin 两行输入，能拿到明文；`system("pause")` 已从 C++ 删除并重编译（2026-11-26）
 - [ ] 往返一致：`decode(encode(payload, key)["sequence"], key) == payload`
 - [ ] 缺参数 / 约束不收敛 / exe 不存在 三种情况都有中文提示，界面不崩
 - [ ] 断网且不开 Ollama 时仍能完成一次编解码
